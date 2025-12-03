@@ -134,6 +134,12 @@ cd scripts
 *   Installs **Namespace Overview**, **Compute Resources**, and **Cluster Top Pods** dashboards.
 *   Outputs direct links to monitor specific namespaces and identify resource hogs.
 
+### Step 7: Configure Registry Access
+Run this script on **ALL nodes** (Master and Workers) to configure Containerd to trust the insecure Harbor registry.
+```bash
+./07-configure-harbor-registry.sh
+```
+
 ---
 
 ## Access Points

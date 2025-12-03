@@ -19,7 +19,14 @@ chmod +x 01-install-gpu-worker.sh
 ```
 *Note: You may need to reboot after driver installation.*
 
-### Step 3: Join the Cluster
+### Step 3: Configure Harbor Registry
+Run this script to allow the worker node to pull images from the private Harbor registry.
+```bash
+chmod +x 02-configure-registry.sh
+./02-configure-registry.sh
+```
+
+### Step 4: Join the Cluster
 1.  **On the Master Node**, run this command to get the join token:
     ```bash
     kubeadm token create --print-join-command
