@@ -32,7 +32,7 @@ chmod +x 02-configure-registry.sh
     kubeadm token create --print-join-command
     ```
 2.  **On the Worker Node**, paste and run the output command.
-    *   Example: `kubeadm join 192.168.1.100:6443 --token abcdef... --discovery-token-ca-cert-hash sha256:12345...`
+    *   Example: `sudo kubeadm join 192.168.1.100:6443 --token abcdef... --discovery-token-ca-cert-hash sha256:12345...`
 
 ### Step 4: Verify
 On the **Master Node**, check if the node is ready:
