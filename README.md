@@ -140,6 +140,12 @@ Run this script on **ALL nodes** (Master and Workers) to configure Containerd to
 ./07-configure-harbor-registry.sh
 ```
 
+### Step 8: Setup Priority Classes (Job Preemption)
+Run this script to create `high-priority` and `low-priority` classes. High priority jobs (e.g., course projects) can preempt low priority ones.
+```bash
+./08-setup-priority-classes.sh
+```
+
 ---
 
 ## Access Points
