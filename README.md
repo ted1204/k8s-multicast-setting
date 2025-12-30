@@ -1,170 +1,145 @@
-# Kubernetes ROS2 Multicast & GPU Cluster
+# Kubernetes Multicast & GPU Cluster
 
-This project provides a complete setup for a Kubernetes cluster optimized for ROS2 applications requiring **Multicast** communication and **NVIDIA GPU** acceleration. It includes a full monitoring stack and a private registry.
+This repo contains scripts and example manifests to set up a Kubernetes cluster with:
 
-## Architecture Overview
+- Calico (pod network)
+- Multus + macvlan (secondary L2 network)
+- NVIDIA GPU support (optional)
+- Longhorn storage
+- Monitoring (Prometheus/Grafana + DCGM)
+- Harbor (private registry)
 
-### 1. Kubernetes Cluster
-*   **Version**: v1.29 (Stable)
-*   **Container Runtime**: containerd (with SystemdCgroup)
-*   **OS**: Ubuntu 24.04 LTS (Noble)
-
-### 2. Networking (CNI)
-The cluster uses a dual-homed network setup via **Multus CNI**:
-
-*   **Primary Network (Pod Network)**:
-    *   **Plugin**: Calico
-    *   **CIDR**: `192.168.0.0/16`
-    *   **Purpose**: Control plane communication, API access, standard K8s networking.
-
-*   **Secondary Network (Multicast)**:
-    *   **Plugin**: Macvlan (Bridge Mode)
-    *   **Master Interface**: `enp6s18` (Physical Interface)
-    *   **Subnet**: `10.121.124.0/24`
-    *   **Gateway**: `10.121.124.254`
-    *   **IP Range**: `10.121.124.200` - `10.121.124.210`
-    *   **Purpose**: High-performance, low-latency ROS2 DDS Multicast communication (Layer 2).
-
-### 3. Storage (CSI)
-*   **Provider**: **Longhorn** (v1.10.1)
-*   **Storage Class**: `longhorn` (Default)
-*   **Features**: Distributed block storage, snapshots, backups, high availability.
-*   **Disk Management**: LVM-based dynamic resizing (`ubuntu-lv`).
-
-### 4. GPU Acceleration
-*   **Hardware**: NVIDIA GPU
-*   **Driver**: NVIDIA Proprietary Driver (Auto-detected, e.g., 535)
-*   **Runtime**: NVIDIA Container Toolkit
-*   **Device Plugin**: NVIDIA K8s Device Plugin (v0.14.0)
-*   **Feature**: **MPS (Multi-Process Service)** enabled for efficient GPU sharing among multiple ROS2 nodes.
-
-### 5. Monitoring & Registry
-*   **Prometheus Stack**: Full cluster monitoring (Node Exporter, Kube State Metrics).
-*   **Grafana**: Visualization dashboards.
-*   **DCGM Exporter**: Deep introspection of NVIDIA GPU metrics (Temperature, Power, Utilization, Memory).
-*   **Harbor**: Private container registry backed by Longhorn storage.
-
+This README is a short, script-driven install guide—run the scripts in order. Edit script variables (interface, CIDRs, IPs) before running.
 ---
 
-## Project Structure
+## Quick script-driven install (concise)
 
-```
-k8s-ros2-multicast/
-├── manifests/
-│   ├── cni/
-│   │   └── macvlan-conf.yaml       # NetworkAttachmentDefinition for ROS2 Multicast
-│   ├── gpu/
-│   │   └── nvidia-device-plugin.yaml # NVIDIA Device Plugin DaemonSet
-│   └── ros2-app/
-│       ├── deployment.yaml         # ROS2 Talker/Listener Deployment
-│       └── service.yaml            # ROS2 Service (Optional)
-├── scripts/
-│   ├── 00-sysctl-tuning.sh         # Tune System Limits (Inotify/OpenFiles)
-│   ├── 01-cluster-init.sh          # Init K8s, Calico, Containerd
-│   ├── 02-install-cni-multicast.sh # Install Multus & Macvlan Config
-│   ├── 03-install-gpu-drivers.sh   # Install NVIDIA Drivers, MPS, Device Plugin
-│   ├── 04-deploy-ros2-app.sh       # Deploy ROS2 Test App (Talker/Listener)
-│   ├── 05-install-monitoring-harbor.sh # Install Helm, Longhorn, Prometheus, Harbor, DCGM
-│   ├── 06-setup-public-dashboards.sh # Setup Public Grafana Dashboards (Namespace/Resources)
-│   └── 99-resize-disk.sh           # Utility to expand LVM disk space
-└── README.md
-```
+Run the included scripts in order. Below are the actual scripts in `scripts/` and the recommended order.
 
----
+Notes: run `00-*` and `06-configure-harbor-registry.sh` on all nodes (master + workers); `01-*`, `02-*`, `04-*`, `05-*`, and dashboard setup on master only; `03-*` on GPU nodes.
 
-## Deployment Guide
+Order and commands:
 
-### Step 0: System Tuning (Prerequisite)
+1) System tuning — run on all nodes
+
 ```bash
-cd scripts
-./00-sysctl-tuning.sh
+cd k8s-multicast-setting/scripts
+sudo ./00-sysctl-tuning.sh
 ```
-*   Increases `fs.inotify.max_user_watches` and `fs.file-max`.
-*   Prevents "Too many open files" errors with Longhorn/Prometheus.
 
-### Step 1: Initialize Cluster
+2) Initialize Kubernetes (master only)
+
 ```bash
-cd scripts
-./01-cluster-init.sh
+sudo ./01-cluster-init.sh
 ```
 
-*   Sets up Kubeadm, Kubelet, Kubectl.
-*   Installs Calico CNI.
-*   Removes Control Plane Taint.
+Save the `kubeadm join ...` printed by the script and run it on each worker node to join the cluster (or use `get-join-command.sh`).
 
-### Step 2: Setup Multicast Network
+Worker node steps (example):
+
+On every worker node (or via remote execution):
+
 ```bash
-./02-install-cni-multicast.sh
+cd k8s-multicast-setting/scripts
+sudo ./00-sysctl-tuning.sh        # run tuning on worker
+# then run the kubeadm join command copied from master, for example:
+# sudo kubeadm join <master-ip>:6443 --token <token> --discovery-token-ca-cert-hash sha256:<hash>
 ```
-*   Installs Multus CNI (Thick plugin).
-*   Creates `macvlan-conf` NetworkAttachmentDefinition attached to `enp6s18`.
 
-### Step 3: Setup GPU Support
+Alternative: on the master, print the join command and run it on worker:
+
 ```bash
-./03-install-gpu-drivers.sh
+ssh user@master 'cd k8s-multicast-setting/scripts && sudo ./get-join-command.sh'
+# copy output and run the printed kubeadm join command on the worker node
 ```
-*   Checks/Installs NVIDIA Drivers.
-*   Enables Persistence Mode & MPS Daemon.
-*   Deploys NVIDIA Device Plugin.
-*   **Note**: May require a reboot if drivers were missing.
 
-### Step 4: Install Storage & Monitoring
+After joining, run the harbor/containerd configuration on each worker:
+
 ```bash
-./05-install-monitoring-harbor.sh
+sudo ./06-configure-harbor-registry.sh
 ```
-*   Installs Helm.
-*   Deploys **Longhorn** (Storage).
-*   Deploys **Prometheus + Grafana** (Monitoring).
-*   Deploys **DCGM Exporter** (GPU Metrics).
-*   Deploys **Harbor** (Registry).
 
-### Step 5: Deploy ROS2 Application
+3) Install Multus + macvlan (master only)
+
 ```bash
-./04-deploy-ros2-app.sh
+sudo ./02-install-cni-multicast.sh
 ```
-*   Deploys `ros2-talker` and `ros2-listener` pods.
-*   Attaches them to the `macvlan-conf` network.
-*   Verifies Multicast communication via logs.
 
-### Step 6: Setup Public Dashboards
-\`\`\`bash
-./06-setup-public-dashboards.sh
-\`\`\`
-*   Enables anonymous access to Grafana (Public View).
-*   Installs **Namespace Overview**, **Compute Resources**, and **Cluster Top Pods** dashboards.
-*   Outputs direct links to monitor specific namespaces and identify resource hogs.
+4) GPU support (GPU nodes only)
 
-### Step 7: Configure Registry Access
-Run this script on **ALL nodes** (Master and Workers) to configure Containerd to trust the insecure Harbor registry.
 ```bash
-./07-configure-harbor-registry.sh
+sudo ./03-install-gpu-drivers.sh
 ```
 
-### Step 8: Setup Priority Classes (Job Preemption)
-Run this script to create `high-priority` and `low-priority` classes. High priority jobs (e.g., course projects) can preempt low priority ones.
+5) Install monitoring, storage, registry (master only)
+
 ```bash
-./08-setup-priority-classes.sh
+sudo ./04-install-monitoring-harbor.sh
 ```
 
----
+6) (Optional) Setup public Grafana dashboards (master only)
 
-## Access Points
-
-| Service | Access Method | URL / Command | Credentials |
-| :--- | :--- | :--- | :--- |
-| **Grafana** | NodePort | \`http://<NodeIP>:30003\` | **Public** (No Login) |
-| **Harbor** | NodePort | \`http://<NodeIP>:30002\` | User: \`admin\`<br>Pass: \`Harbor12345\` |
-| **Longhorn UI** | Port Forward | \`localhost:8000\` | N/A |
-
-**Port Forward Commands (Optional):**
 ```bash
-# Longhorn
-kubectl port-forward -n longhorn-system svc/longhorn-frontend 8000:80
+sudo ./05-setup-public-dashboards.sh
 ```
 
+7) Configure Harbor / containerd trust (run on all nodes)
 
-## Troubleshooting
+```bash
+sudo ./06-configure-harbor-registry.sh
+```
 
-*   **Pod Stuck in ContainerCreating**: Check disk space (`df -h`) or CNI errors (`kubectl describe pod`).
-*   **Multicast Not Working**: Ensure `macvlan-conf.yaml` uses the correct physical interface (`master: enp6s18`).
-*   **GPU Not Found**: Check `nvidia-smi` on host and `kubectl get nodes -o=custom-columns=NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu`.
+8) Priority classes (master only)
+
+```bash
+sudo ./07-setup-priority-classes.sh
+```
+
+Other helpful scripts:
+
+- `get-join-command.sh` — print or regenerate the `kubeadm join` command for worker nodes
+- `reset-cluster.sh` — reset cluster state (use with caution)
+
+Important: there is no `deploy-app` script in this repo. If you need a sample app, check `manifests/` or add your own deployment manifest and apply it with `kubectl apply -f manifests/<your-app>.yaml`.
+## Minimal verification
+
+- Check nodes and pods:
+
+```bash
+kubectl get nodes
+kubectl get pods -A
+```
+
+- Check macvlan network attachment definitions:
+
+```bash
+kubectl get net-attach-def -A
+```
+
+- Check that a pod annotated for macvlan has a secondary interface:
+
+```bash
+kubectl describe pod <pod>
+kubectl logs <pod>
+```
+
+- GPU nodes:
+
+```bash
+nvidia-smi   # on host
+kubectl get daemonset -n kube-system | grep nvidia
+```
+
+- Check Longhorn / monitoring / harbor services:
+
+```bash
+kubectl -n longhorn-system get pods
+kubectl -n monitoring get pods
+kubectl -n harbor get svc
+```
+
+## Notes
+
+- Edit script variables (interface name, CIDRs, IP ranges, MASTER_IP) inside `scripts/` before running.
+- `00-sysctl-tuning.sh` and `07-configure-harbor-registry.sh` should be run on all nodes (master + workers).
+- Keep the cluster secure: review Harbor/Grafana anonymous access settings before enabling.
