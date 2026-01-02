@@ -5,7 +5,7 @@ set -e
 # [CRITICAL] Default Pod CIDR. Can be overridden by env var or first arg
 # Use a /16 by default to avoid accidental overlap with common LAN subnets.
 POD_CIDR=${POD_CIDR:-${1:-"10.244.0.0/16"}}
-K8S_VERSION="1.32"
+K8S_VERSION="1.35"
 CALICO_VERSION="v3.31.3" 
 # =================================================
 
@@ -64,6 +64,8 @@ curl -fsSL https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/deb/Release.key | s
 echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
 
 sudo apt-get update
+# sudo apt-mark unhold kubelet kubeadm kubectl
+# sudo apt-get remove kubelet kubeadm kubectl
 sudo apt-get install -y kubelet kubeadm kubectl
 sudo apt-mark hold kubelet kubeadm kubectl
 sudo systemctl enable --now kubelet

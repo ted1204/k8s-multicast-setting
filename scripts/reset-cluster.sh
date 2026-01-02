@@ -53,5 +53,5 @@ systemctl start containerd
 echo "-------------------------------------------------------"
 echo "[SUCCESS] Cluster reset complete."
 echo "Ports 6443/2379/2380 are now free."
-echo "You can now run './install_k8s_fixed.sh'."
+echo "You can now run './01-cluster-init.sh'."
 echo "-------------------------------------------------------"

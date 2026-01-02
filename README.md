@@ -101,6 +101,30 @@ Other helpful scripts:
 - `reset-cluster.sh` — reset cluster state (use with caution)
 
 Important: there is no `deploy-app` script in this repo. If you need a sample app, check `manifests/` or add your own deployment manifest and apply it with `kubectl apply -f manifests/<your-app>.yaml`.
+
+## Worker node automation scripts
+
+The `worker-node/` folder contains host-prep helpers when adding nodes to the control plane:
+
+- [worker-node/00-worker-prereqs.sh](worker-node/00-worker-prereqs.sh): swap off, kernel modules, sysctl tuning, iSCSI/NFS deps.
+- [worker-node/01-worker-install.sh](worker-node/01-worker-install.sh): installs containerd and Kubernetes v1.35. Export `CONTROL_PLANE_ENDPOINT`, `JOIN_TOKEN`, `DISCOVERY_HASH` (and optionally `NODE_NAME`) to auto-run `kubeadm join` using the containerd socket; otherwise it only installs binaries and holds them.
+- [worker-node/02-worker-gpu-harbor.sh](worker-node/02-worker-gpu-harbor.sh): GPU nodes only. Installs a pinned NVIDIA driver, sets up NVIDIA container toolkit, generates CDI spec, and trusts Harbor registry at `HARBOR_IP:HARBOR_PORT` (defaults `192.168.109.1:30002`).
+- [worker-node/03-worker-longhorn.sh](worker-node/03-worker-longhorn.sh): Longhorn prerequisites (iSCSI/NFS utils, module loading, kubelet plugin dirs).
+
+Example join flow on a new worker:
+
+```bash
+cd k8s-multicast-setting/worker-node
+sudo ./00-worker-prereqs.sh
+export CONTROL_PLANE_ENDPOINT="10.0.0.10:6443"
+export JOIN_TOKEN="abcdef.0123456789abcdef"
+export DISCOVERY_HASH="sha256:<hash>"
+sudo ./01-worker-install.sh
+# GPU nodes only
+sudo ./02-worker-gpu-harbor.sh
+# Optional: storage prereqs
+sudo ./03-worker-longhorn.sh
+```
 ## Minimal verification
 
 - Check nodes and pods:
