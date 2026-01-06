@@ -196,7 +196,7 @@ if [ "$TARGET_NODE" = "all" ]; then
 else
   kubectl label node "$TARGET_NODE" nvidia.com/mps.capable=true --overwrite
 fi
-helm upgrade --install nvidia-device-plugin /home/user/k8s/k8s-device-plugin/deployments/helm/nvidia-device-plugin \
+helm upgrade --install nvidia-device-plugin /home/user/k8s-gpu-platform/k8s-device-plugin/deployments/helm/nvidia-device-plugin \
   --namespace kube-system \
   --create-namespace \
   -f "$VALUES_FILE" \

@@ -63,7 +63,7 @@ DETECTED_CIDR=$(ip -o -f inet addr show "$DETECTED_IF" | awk '{print $4}' | head
 
 if [ -z "${RANGE:-}" ]; then
     IP_PREFIX=$(echo "$DETECTED_GW" | cut -d. -f1-3)
-  DETECTED_RANGE="${IP_PREFIX}.200-${IP_PREFIX}.250/24"
+    DETECTED_RANGE="${IP_PREFIX}.200-${IP_PREFIX}.250/24"
     echo "[WARN] using auto-detected range: $DETECTED_RANGE"
 else
     DETECTED_RANGE=$RANGE
@@ -184,8 +184,8 @@ kubectl apply -f "${BASE_URL}/whereabouts.cni.cncf.io_ippools.yaml"
 echo "[INFO] Patching OverlappingRange CRD to remove 'containerid' requirement..."
 curl -sL "${BASE_URL}/whereabouts.cni.cncf.io_overlappingrangeipreservations.yaml" -o /tmp/crd-overlapping.yaml
 
-# 使用 sed 刪除含有 "- containerid" 的那一行
-sed -i '/- containerid/d' /tmp/crd-overlapping.yaml
+# 使用 sed 刪除含有 "- containerid" 的那一行 (支援任意空白)
+sed -i '/^\s*-\s*containerid/d' /tmp/crd-overlapping.yaml
 
 kubectl apply -f /tmp/crd-overlapping.yaml
 rm -f /tmp/crd-overlapping.yaml

@@ -1,8 +1,5 @@
 #!/bin/bash
-# 腳本用途：徹底清除 Kubernetes, CNI, Etcd 與殘留進程
-# 使用方式：sudo ./reset-cluster.sh
 
-# 確保以 root 執行
 if [ "$EUID" -ne 0 ]; then
   echo "[ERROR] Please run as root."
   exit 1

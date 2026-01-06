@@ -103,39 +103,10 @@ sudo mkdir -p /root/.kube
 sudo cp -f /etc/kubernetes/admin.conf /root/.kube/config
 sudo chmod 600 /root/.kube/config
 
-echo "=== 5. Install Primary CNI (Calico) ==="
-
-echo "--> Installing Calico binaries manually to /opt/cni/bin..."
-sudo mkdir -p /opt/cni/bin
-cd /tmp
-curl -f -L -O https://github.com/projectcalico/calico/releases/download/${CALICO_VERSION}/release-${CALICO_VERSION}.tgz && tar -xzf release-${CALICO_VERSION}.tgz
-sudo cp -f release-${CALICO_VERSION}/bin/cni/amd64/calico /opt/cni/bin/
-sudo cp -f release-${CALICO_VERSION}/bin/cni/amd64/calico-ipam /opt/cni/bin/
-sudo chmod +x /opt/cni/bin/calico /opt/cni/bin/calico-ipam
-echo "--> Calico binaries installed."
-
-
-
-cd /tmp
-curl -L -O https://github.com/containernetworking/plugins/releases/download/v1.3.0/cni-plugins-linux-amd64-v1.3.0.tgz
-
-sudo tar -xzf cni-plugins-linux-amd64-v1.3.0.tgz -C /opt/cni/bin/
-
-ls -la /opt/cni/bin/ | grep macvlan
-
-# Download and Apply Manifest
-cd $HOME
-curl -O https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml
-
-echo "Patching Calico CIDR to $POD_CIDR..."
-sed -i "s|192.168.0.0/16|$POD_CIDR|g" calico.yaml
-
-kubectl apply -f calico.yaml
-
 echo "=== 6. Post-Install ==="
 # Untaint master
 kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
 
 echo "-------------------------------------------------------"
-echo "K8s Installation Complete!"
-echo "Next Step: Run your Multus/Macvlan script."
+echo "K8s Master Initialized!"
+echo "Next Step: Run '02-network-calico.sh' to set up the network."

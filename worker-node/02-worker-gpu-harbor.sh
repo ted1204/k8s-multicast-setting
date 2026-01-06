@@ -15,18 +15,6 @@ echo ">>> Checking dependencies..."
 sudo apt-get update -qq
 sudo apt-get install -y curl gpg ca-certificates
 
-# --- 1. Install NVIDIA Driver ---
-echo ">>> Installing NVIDIA Driver $DRIVER_VERSION..."
-# Check if the specific package exists to avoid breaking halfway
-if apt-cache show "nvidia-driver-$DRIVER_VERSION" >/dev/null 2>&1; then
-    sudo apt-get install -y "nvidia-driver-$DRIVER_VERSION" linux-headers-$(uname -r)
-else
-    echo "ERROR: nvidia-driver-$DRIVER_VERSION not found in repositories."
-    echo "Available versions:"
-    apt-cache search nvidia-driver | grep -oP 'nvidia-driver-\d+' | sort -u | tail -n 5
-    exit 1
-fi
-
 # --- 2. Install NVIDIA Container Toolkit ---
 echo ">>> Installing NVIDIA Container Toolkit..."
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor --yes -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg

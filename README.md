@@ -16,37 +16,65 @@ This README is a short, script-driven install guide—run the scripts in order. 
 
 Run the included scripts in order. Below are the actual scripts in `scripts/` and the recommended order.
 
-Notes: run `00-*` and `06-configure-harbor-registry.sh` on all nodes (master + workers); `01-*`, `02-*`, `04-*`, `05-*`, and dashboard setup on master only; `03-*` on GPU nodes.
+### Phase 1: Cluster Initialization
 
-Order and commands:
-
-1) System tuning — run on all nodes
-
+1) **System Tuning** (Run on **ALL** nodes: Master + Workers)
 ```bash
-cd k8s-multicast-setting/scripts
+cd k8s-cluster-setup/scripts
 sudo ./00-sysctl-tuning.sh
 ```
 
-2) Initialize Kubernetes (master only)
-
+2) **Initialize Master** (Run on **Master** only)
 ```bash
 sudo ./01-cluster-init.sh
 ```
 
-Save the `kubeadm join ...` printed by the script and run it on each worker node to join the cluster (or use `get-join-command.sh`).
-
-Worker node steps (example):
-
-On every worker node (or via remote execution):
-
+3) **Install Primary Network (Calico)** (Run on **Master** only)
 ```bash
-cd k8s-multicast-setting/scripts
-sudo ./00-sysctl-tuning.sh        # run tuning on worker
-# then run the kubeadm join command copied from master, for example:
-# sudo kubeadm join <master-ip>:6443 --token <token> --discovery-token-ca-cert-hash sha256:<hash>
+# This sets up Calico with the correct Interface binding (192.168.109.x)
+./02-network-calico.sh
 ```
 
-Alternative: on the master, print the join command and run it on worker:
+### Phase 2: Worker Nodes Join
+
+4) **Join Workers**
+   - On **Master**, run:
+     ```bash
+     ./03-get-join-command.sh
+     ```
+   - Copy the output command.
+   - Run it on **EACH Worker Node**.
+
+### Phase 3: Cluster Services (Run on Master)
+
+5) **Install Secondary Network (Multus)**
+```bash
+./04-network-multus.sh
+```
+
+6) **Setup Storage (NFS)**
+```bash
+# Deploys NFS Provisioner (replaces Longhorn)
+./05-storage-nfs.sh
+```
+
+7) **Setup GPU Support**
+```bash
+# Deploys NVIDIA Device Plugin & MPS
+./06-gpu-setup.sh
+```
+
+8) **Deploy Monitoring & Harbor**
+```bash
+# Installs Prometheus, Grafana, and Harbor Registry
+./07-monitoring.sh
+```
+
+### Repair Tools
+Located in `scripts/tools/`:
+- `repair-gpu-node.sh`: Fixes NVIDIA Runtime issues on a remote node.
+- `fix-routes.sh`: Flushes stale routes.
+
 
 ```bash
 ssh user@master 'cd k8s-multicast-setting/scripts && sudo ./get-join-command.sh'
