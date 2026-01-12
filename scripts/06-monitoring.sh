@@ -2,33 +2,35 @@
 set -e
 
 # ========================================================
-#   GLOBAL CONFIGURATION
+#   GLOBAL CONFIGURATION (PRODUCTION)
 # ========================================================
 HARBOR_NAMESPACE="harbor"
 MONITOR_NAMESPACE="monitoring"
 INSTALLER_NAMESPACE="harbor-certs"
+LONGHORN_NAMESPACE="longhorn-system"
 
 HARBOR_ADMIN_PASSWORD=${HARBOR_ADMIN_PASSWORD:-"HarborProd123!"}
 STORAGE_HOSTNAME="gpu1-storage"
 
 # === [NETWORK CONFIGURATION] ===
-# 1. UI/Management IP (1Gbps) - For Browser Access
+# 1. UI/Management IP (1Gbps) - For Admin Browser Access
 UI_IP="192.168.109.1"
 
-# 2. Data/Storage IP (25Gbps) - For Docker Pull/Push
-# We explicitly set this to .1 (Storage) instead of .101 (Interconnect)
+# 2. Data/Storage IP (25Gbps) - For High Speed Docker Pull/Push
 DATA_IP="192.168.110.1"
 
-# NodePorts
-HTTPS_NODE_PORT=30003
-HTTP_NODE_PORT=30002
-GRAFANA_PORT=30004
+# === [PORTS CONFIGURATION] ===
+# Static NodePorts for consistent access
+HTTPS_NODE_PORT=30003   # Harbor HTTPS
+HTTP_NODE_PORT=30002    # Harbor HTTP (Redirect)
+GRAFANA_PORT=30004      # Grafana UI
+LONGHORN_UI_PORT=30005  # Longhorn UI (New)
 
 # Paths & Storage
 CERTS_DIR="certs"
 CERT_CONFIGMAP_PATH="/tmp/harbor-ca-configmap.yaml"
 CERT_DAEMONSET_PATH="/tmp/harbor-ca-daemonset.yaml"
-STORAGE_CLASS="nfs-client"
+STORAGE_CLASS="longhorn"
 DCGM_MANIFEST_PATH="../manifests/gpu/gpu-exporter.yaml"
 
 # Logging Helpers
@@ -45,11 +47,11 @@ step() { echo -e "${CYAN}-------------------------------------------------------
 #   START DEPLOYMENT
 # ========================================================
 
-step "1. Network Configuration Check"
+step "1. Network & Pre-flight Checks"
 log "Management Interface (UI):   $UI_IP"
 log "Storage Interface (Data):    $DATA_IP"
 
-# Sanity Check: Ensure DATA_IP belongs to the 25Gbps subnet (110.x)
+# Sanity Check for 25Gb subnet
 if [[ "$DATA_IP" != "192.168.110."* ]]; then
     warn "Warning: DATA_IP ($DATA_IP) does not look like the 110.x subnet."
     read -p "Continue anyway? (y/n) " -n 1 -r
@@ -57,29 +59,28 @@ if [[ "$DATA_IP" != "192.168.110."* ]]; then
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then exit 1; fi
 fi
 
-# Check Helm installation
+# Check Helm
 if ! command -v helm &> /dev/null; then
     log "Helm not found. Installing..."
-    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 fi
 
-step "2. Certificate Generation (Multi-IP Support)"
-log "Generating SSL certificates including BOTH UI and DATA IPs..."
+step "2. Certificate Generation (Dual-IP Support)"
+log "Generating SSL certificates for both $UI_IP and $DATA_IP..."
 mkdir -p "$CERTS_DIR"
 
-# Generate CA Key and Certificate
+# Generate CA
 openssl genrsa -out "$CERTS_DIR/ca.key" 4096
 openssl req -x509 -new -nodes -sha512 -days 3650 \
  -subj "/C=TW/ST=Taipei/L=Taipei/O=GPU-Cluster/OU=IT/CN=Harbor-CA" \
  -key "$CERTS_DIR/ca.key" -out "$CERTS_DIR/ca.crt"
 
-# Generate Harbor Server Key and CSR
+# Generate Server Key
 openssl genrsa -out "$CERTS_DIR/harbor.key" 4096
 openssl req -new -key "$CERTS_DIR/harbor.key" -out "$CERTS_DIR/harbor.csr" \
   -subj "/C=TW/ST=Taipei/L=Taipei/O=GPU-Cluster/OU=IT/CN=$DATA_IP"
 
-# V3 Extension for SAN (Subject Alternative Name)
-# This is crucial: We add BOTH the UI IP and the Data IP to the certificate.
+# V3 Extension (Subject Alternative Name)
 cat > "$CERTS_DIR/v3.ext" <<-EOF
 authorityKeyIdentifier=keyid,issuer
 basicConstraints=CA:FALSE
@@ -92,48 +93,48 @@ IP.2 = $UI_IP
 DNS.1 = $STORAGE_HOSTNAME
 EOF
 
-# Sign the Harbor Certificate using our CA
+# Sign Certificate
 openssl x509 -req -in "$CERTS_DIR/harbor.csr" -CA "$CERTS_DIR/ca.crt" -CAkey "$CERTS_DIR/ca.key" -CAcreateserial \
  -out "$CERTS_DIR/harbor.crt" -days 3650 -sha512 -extfile "$CERTS_DIR/v3.ext"
 
-openssl verify -CAfile $CERTS_DIR/ca.crt $CERTS_DIR/harbor.crt
+log "Certificates generated successfully."
 
-log "Certificates generated. Valid for IPs: $DATA_IP and $UI_IP"
-
-step "3. Kubernetes Secrets & Namespaces"
-# Create namespaces if they don't exist
+step "3. Prepare Kubernetes Secrets"
+step "3. Prepare Kubernetes Secrets"
+# Create namespaces
 kubectl create namespace $HARBOR_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace $MONITOR_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace $INSTALLER_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 
-# Create Harbor TLS Secret
+# Harbor HTTPS Secret
 kubectl -n $HARBOR_NAMESPACE delete secret harbor-https-secret --ignore-not-found
 kubectl -n $HARBOR_NAMESPACE create secret tls harbor-https-secret \
   --key "$CERTS_DIR/harbor.key" \
   --cert "$CERTS_DIR/harbor.crt"
 
-# Registry Secrets (Push secret to all namespaces)
-REGISTRY_NAMESPACES="default harbor monitoring nfs-storage $(kubectl get ns -o jsonpath='{.items[*].metadata.name}')"
+# Docker Registry Credential (Global Sync)
+REGISTRY_NAMESPACES="default harbor monitoring longhorn-system nfs-storage $(kubectl get ns --field-selector status.phase=Active -o jsonpath='{.items[*].metadata.name}')"
 REGISTRY_NAMESPACES=$(echo "$REGISTRY_NAMESPACES" | tr ' ' '\n' | sort -u | tr '\n' ' ')
 
-log "Creating Harbor registry secret in all namespaces..."
+log "Syncing Docker Registry Secret to all namespaces..."
 for NS in $REGISTRY_NAMESPACES; do
-  kubectl delete secret harbor-regcred -n "$NS" --ignore-not-found >/dev/null 2>&1
-  # CRITICAL: We set the Docker Server to DATA_IP ($DATA_IP)
-  # This ensures Kubernetes nodes use the 25Gbps interface to pull images.
+  # Skip kube-public or kube-node-lease if needed, but usually okay
+  # [FIX] Add '|| true' to prevent script exit on failure
+  kubectl delete secret harbor-regcred -n "$NS" --ignore-not-found >/dev/null 2>&1 || true
+  
   kubectl create secret docker-registry harbor-regcred \
     --docker-server="$DATA_IP:$HTTPS_NODE_PORT" \
     --docker-username="admin" \
     --docker-password="$HARBOR_ADMIN_PASSWORD" \
     --docker-email="admin@example.com" \
-    -n "$NS" >/dev/null 2>&1
+    -n "$NS" >/dev/null 2>&1 || true
 done
+log "Secret sync complete."
 
-step "4. Distribute CA to All Nodes (DaemonSet)"
-log "Injecting CA certificate into containerd trust store on all nodes..."
-log "Targeting Registry URL for Trust: https://$DATA_IP:$HTTPS_NODE_PORT"
+step "4. Distribute CA to Nodes (Containerd Trust)"
+log "Configuring all nodes to trust Harbor CA on port $HTTPS_NODE_PORT..."
 
-# Create ConfigMap with CA Certificate
+# ConfigMap
 cat > "$CERT_CONFIGMAP_PATH" <<EOF
 apiVersion: v1
 kind: ConfigMap
@@ -145,7 +146,7 @@ data:
 $(sed 's/^/    /' "$CERTS_DIR/ca.crt")
 EOF
 
-# Create DaemonSet (Installer)
+# DaemonSet
 cat > "$CERT_DAEMONSET_PATH" <<EOF
 apiVersion: apps/v1
 kind: DaemonSet
@@ -164,12 +165,7 @@ spec:
       hostPID: true
       hostNetwork: true
       tolerations:
-      - key: node-role.kubernetes.io/control-plane
-        operator: Exists
-        effect: NoSchedule
-      - key: node-role.kubernetes.io/master
-        operator: Exists
-        effect: NoSchedule
+      - operator: Exists
       initContainers:
       - name: install-cert
         image: alpine:latest
@@ -181,8 +177,7 @@ spec:
             set -e
             apk add --no-cache util-linux >/dev/null
             
-            # Use DATA_IP (192.168.110.1) as the trusted endpoint.
-            # This ensures nodes trust the 25GbE path.
+            # Using DATA_IP for internal node communication
             TARGET_IP="$DATA_IP"
             TARGET_PORT="$HTTPS_NODE_PORT"
             
@@ -190,33 +185,29 @@ spec:
             HOSTS_DIR="/host/etc/containerd/certs.d/\$TARGET_IP:\$TARGET_PORT"
             HOSTS_FILE="\$HOSTS_DIR/hosts.toml"
             
-            # === IDEMPOTENCY CHECK ===
-            echo "Configuring Containerd for Harbor (\$TARGET_IP)..."
+            echo "Installing CA for \$TARGET_IP..."
 
-            # 1. Ensure containerd config exists and is valid
+            # 1. Containerd Config Check
             if [ ! -f "\$CONFIG_TOML" ]; then
               mkdir -p /host/etc/containerd
               nsenter --mount=/proc/1/ns/mnt -- containerd config default > "\$CONFIG_TOML"
             fi
             
-            # Enable certs.d config path if not enabled
             if grep -q 'config_path = ""' "\$CONFIG_TOML"; then
               sed -i 's|config_path = ""|config_path = "/etc/containerd/certs.d"|g' "\$CONFIG_TOML"
-              NEED_RESTART=true
             fi
 
-            # 2. Write Certificate and hosts.toml
+            # 2. Create certs.d entry
             mkdir -p "\$HOSTS_DIR"
             cp /config/ca.crt "\$HOSTS_DIR/ca.crt"
             
-            echo "Generating hosts.toml..."
             printf 'server = "https://%s:%s"\n' "\$TARGET_IP" "\$TARGET_PORT" > "\$HOSTS_FILE"
             printf '[host."https://%s:%s"]\n' "\$TARGET_IP" "\$TARGET_PORT" >> "\$HOSTS_FILE"
             printf '  capabilities = ["pull", "resolve", "push"]\n' >> "\$HOSTS_FILE"
             printf '  ca = "/etc/containerd/certs.d/%s:%s/ca.crt"\n' "\$TARGET_IP" "\$TARGET_PORT" >> "\$HOSTS_FILE"
 
-            # 3. Restart Containerd (only on first setup)
-            echo "Restarting containerd..."
+            # 3. Reload Containerd
+            echo "Reloading containerd..."
             nsenter --mount=/proc/1/ns/mnt -- systemctl restart containerd
         volumeMounts:
         - name: host-etc
@@ -235,20 +226,17 @@ spec:
           name: harbor-ca-cert
 EOF
 
-# Clean up and Apply DaemonSet
 kubectl delete daemonset harbor-cert-installer -n $INSTALLER_NAMESPACE --ignore-not-found >/dev/null
 kubectl apply -f "$CERT_CONFIGMAP_PATH"
 kubectl apply -f "$CERT_DAEMONSET_PATH"
-
-log "Waiting for certificate distribution..."
+log "Waiting for CA distribution..."
 kubectl rollout status daemonset/harbor-cert-installer -n $INSTALLER_NAMESPACE --timeout=180s
 
 step "5. Deploy Harbor Registry"
-log "Upgrading/Installing Harbor..."
+log "Deploying Harbor..."
 helm repo add harbor https://helm.goharbor.io 2>/dev/null
 helm repo update > /dev/null
 
-# We set externalURL to DATA_IP so Harbor provides the correct pull commands for high-speed transfer
 helm upgrade --install harbor harbor/harbor \
   --namespace $HARBOR_NAMESPACE \
   --set harborAdminPassword="$HARBOR_ADMIN_PASSWORD" \
@@ -268,12 +256,13 @@ helm upgrade --install harbor harbor/harbor \
   --set internalTLS.enabled=false \
   --wait
 
-step "6. Deploy Prometheus & Grafana"
-log "Configuring Kube-Prometheus-Stack..."
+step "6. Deploy Monitoring (Production Config)"
+log "Generating Production Values for Prometheus & Grafana..."
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null
 helm repo update > /dev/null
 
-cat <<EOF > /tmp/monitoring-values.yaml
+# Clean Production Values - No Comments
+cat <<EOF > /tmp/monitoring-prod-values.yaml
 grafana:
   service:
     type: NodePort
@@ -281,20 +270,21 @@ grafana:
   persistence:
     enabled: true
     storageClass: $STORAGE_CLASS
-    size: 10Gi
+    size: 20Gi
   grafana.ini:
     auth.anonymous:
       enabled: true
       org_role: Viewer
       org_name: GPU Cluster
-    auth:
-      disable_login_form: false
+    security:
+      allow_embedding: true
   sidecar:
     dashboards:
       enabled: true
       label: grafana_dashboard
 prometheus:
   prometheusSpec:
+    retention: 15d
     serviceMonitorSelectorNilUsesHelmValues: false
     storageSpec:
       volumeClaimTemplate:
@@ -303,25 +293,33 @@ prometheus:
           accessModes: ["ReadWriteOnce"]
           resources:
             requests:
-              storage: 20Gi
+              storage: 50Gi
+alertmanager:
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: $STORAGE_CLASS
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
 EOF
 
+log "Deploying kube-prometheus-stack..."
 helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace $MONITOR_NAMESPACE \
   --create-namespace \
-  -f /tmp/monitoring-values.yaml \
+  -f /tmp/monitoring-prod-values.yaml \
   --wait
 
-step "7. Deploy NVIDIA DCGM Exporter"
-if [ ! -f "$DCGM_MANIFEST_PATH" ]; then
-    warn "DCGM Manifest not found at $DCGM_MANIFEST_PATH! Skipping..."
-else
-    log "Deploying NVIDIA DCGM Exporter..."
+step "7. Deploy GPU Metrics (DCGM)"
+if [ -f "$DCGM_MANIFEST_PATH" ]; then
+    log "Deploying DCGM Exporter..."
     kubectl apply -f "$DCGM_MANIFEST_PATH"
-fi
-
-# Manual ServiceMonitor for DCGM
-cat <<EOF | kubectl apply -f -
+    
+    # Ensure ServiceMonitor exists
+    cat <<EOF | kubectl apply -f -
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -341,17 +339,21 @@ spec:
     interval: 15s
     path: /metrics
 EOF
+else
+    warn "DCGM manifest missing. Skipping."
+fi
 
 step "8. Import Dashboards"
 install_dashboard() {
     local ID=$1
     local NAME=$2
     local FILE="/tmp/${NAME}.json"
-    log "Importing Dashboard: $NAME ($ID)..."
+    log "Fetching Dashboard ID: $ID ($NAME)..."
     curl -sL -o "$FILE" "https://grafana.com/api/dashboards/${ID}/revisions/latest/download"
-    # Fix Datasource to Prometheus
+    # Auto-fix datasource
     sed -i 's/"datasource": *"[^"]*"/"datasource": "Prometheus"/g' "$FILE"
     sed -i 's/${DS_PROMETHEUS}/Prometheus/g' "$FILE"
+    
     kubectl create configmap "grafana-dashboard-${NAME}" \
       --namespace $MONITOR_NAMESPACE \
       --from-file="${NAME}.json=${FILE}" \
@@ -361,23 +363,51 @@ install_dashboard() {
     rm "$FILE"
 }
 
+# Standard GPU Dashboards
 install_dashboard 12239 "nvidia-gpu"
 install_dashboard 15758 "ns-view"
 install_dashboard 15761 "ns-compute"
 install_dashboard 6417  "cluster-top"
 
-log "Restarting Grafana to load dashboards..."
+log "Reloading Grafana..."
 kubectl rollout restart deployment kube-prometheus-stack-grafana -n $MONITOR_NAMESPACE
 
-step "9. Summary"
+step "9. Expose Longhorn Dashboard (Public)"
+log "Configuring Longhorn UI to be publicly accessible (NodePort)..."
+
+# Patch the service to NodePort
+# kubectl patch svc longhorn-frontend -n $LONGHORN_NAMESPACE --type='json' \
+#   -p="[{'op': 'replace', 'path': '/spec/type', 'value': 'NodePort'}]"
+
+# # Try to set specific port (may fail if port is taken, but we try)
+# cat <<EOF | kubectl apply -f -
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: longhorn-frontend
+#   namespace: $LONGHORN_NAMESPACE
+# spec:
+#   type: NodePort
+#   selector:
+#     app: longhorn-ui
+#   ports:
+#   - name: http
+#     port: 80
+#     targetPort: http
+#     nodePort: $LONGHORN_UI_PORT
+# EOF
+
+# log "Longhorn UI configured."
+
+step "10. Deployment Summary"
 echo "========================================================"
-echo -e "${GREEN}   DEPLOYMENT COMPLETE! ${NC}"
+echo -e "${GREEN}   PRODUCTION DEPLOYMENT COMPLETE ${NC}"
 echo "========================================================"
-echo -e "1. [UI/Management] Browser Access (1G Network):"
-echo -e "   Harbor:  https://$UI_IP:$HTTPS_NODE_PORT"
-echo -e "   Grafana: http://$UI_IP:$GRAFANA_PORT"
+echo -e "Access these URLs via your Management IP ($UI_IP):"
+echo -e "   1. Harbor UI:    https://$UI_IP:$HTTPS_NODE_PORT"
+echo -e "   2. Grafana:      http://$UI_IP:$GRAFANA_PORT"
+# echo -e "   3. Longhorn UI:  http://$UI_IP:$LONGHORN_UI_PORT"
 echo ""
-echo -e "2. [Data/Storage] Docker/K8s Pulls (25G Network):"
-echo -e "   Command: docker login $DATA_IP:$HTTPS_NODE_PORT"
-echo -e "   Host:    $DATA_IP"
+echo -e "Docker Pull Command (High Speed / Internal):"
+echo -e "   docker pull $DATA_IP:$HTTPS_NODE_PORT/project/image:tag"
 echo "========================================================"

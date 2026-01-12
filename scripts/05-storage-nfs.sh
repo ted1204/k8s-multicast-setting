@@ -1,15 +1,14 @@
 #!/bin/bash
 set -e
 
-# Nodes Configuration
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
 NODES=("gpu1" "gpu2" "gpu3")
-NFS_SERVER_NODE="gpu1"
-# Preferred 25Gb Interconnect for Storage
-INTERCONNECT_CIDR="192.168.110.0/24"
-STORAGE_IFACE=${STORAGE_IFACE:-"enp193s0f0np0"}
-# Default NFS Server IP on 25Gb (override with env or set to 'auto' to detect)
-NFS_SERVER_IP=${NFS_SERVER_IP:-"192.168.110.1"}
-EXPORT_PATH="/data/k8s-nfs"
+LONGHORN_VERSION="v1.6.0"
+DATA_PATH="/data/longhorn"
+REPLICA_COUNT=3
+NAMESPACE="longhorn-system"
 
 # Interactive Password Prompt
 if [ -z "$NODE_PASS" ]; then
@@ -19,65 +18,36 @@ fi
 export NODE_PASS
 
 echo "====================================================="
-echo "   SETTING UP NFS SERVER ON $NFS_SERVER_NODE"
+echo "   PREPARING PRODUCTION LONGHORN STORAGE"
 echo "====================================================="
 
-# 1. Install NFS Server on gpu1
-setup_nfs_server() {
-    echo ">> Configuring NFS Server on $NFS_SERVER_NODE..."
-    
-    CMD_CONTENT=$(cat <<EOF
-set -e
-echo "$NODE_PASS" | sudo -S -p '' apt-get update -qq
-echo "$NODE_PASS" | sudo -S -p '' apt-get install -y nfs-kernel-server
-
-echo "   - Creating export directory: $EXPORT_PATH"
-echo "$NODE_PASS" | sudo -S -p '' mkdir -p $EXPORT_PATH
-echo "$NODE_PASS" | sudo -S -p '' chown nobody:nogroup $EXPORT_PATH
-echo "$NODE_PASS" | sudo -S -p '' chmod 777 $EXPORT_PATH
-
-echo "   - Configuring /etc/exports"
-# Backup existing
-if [ ! -f /etc/exports.bak ]; then
-    echo "$NODE_PASS" | sudo -S -p '' cp /etc/exports /etc/exports.bak
-fi
-
-    # CLEANUP: Remove lines starting with digits (previous script error caused password specific artifacts)
-    echo "$NODE_PASS" | sudo -S -p '' bash -c "sed -i '/^[0-9]/d' /etc/exports"
-
-    # Add export if not exists (restrict to Interconnect CIDR)
-    if ! grep -q "$EXPORT_PATH" /etc/exports; then
-        echo "$NODE_PASS" | sudo -S -p '' bash -c "echo '$EXPORT_PATH $INTERCONNECT_CIDR(rw,sync,no_subtree_check,no_root_squash)' >> /etc/exports"
-    fi
-
-echo "   - Restarting NFS Server"
-echo "$NODE_PASS" | sudo -S -p '' exportfs -a
-echo "$NODE_PASS" | sudo -S -p '' systemctl restart nfs-kernel-server
-echo ">> NFS Server Ready"
-EOF
-)
-    # Encode
-    B64_CMD=$(echo "$CMD_CONTENT" | base64 -w0)
-    
-    if [ "$NFS_SERVER_NODE" == "$(hostname)" ]; then
-        echo "$B64_CMD" | base64 -d | bash
-    else
-        sshpass -p "$NODE_PASS" ssh -o StrictHostKeyChecking=no -t $NFS_SERVER_NODE "echo '$B64_CMD' | base64 -d | bash"
-    fi
-}
-
-# 2. Install Client Packages on ALL nodes
-setup_clients() {
+install_dependencies() {
     for NODE in "${NODES[@]}"; do
-        echo ">> Installing NFS Client on $NODE..."
+        echo ">> [Step 1] Configuring Dependencies on $NODE..."
+        
+        # Longhorn requires open-iscsi and nfs-common (for backups)
+        # util-linux is for nsenter
         CMD_CONTENT=$(cat <<EOF
 set -e
+echo "   - Updating apt cache..."
 echo "$NODE_PASS" | sudo -S -p '' apt-get update -qq
-echo "$NODE_PASS" | sudo -S -p '' apt-get install -y nfs-common
+
+echo "   - Installing open-iscsi, nfs-common, cryptsetup..."
+echo "$NODE_PASS" | sudo -S -p '' apt-get install -y open-iscsi nfs-common util-linux cryptsetup jq
+
+echo "   - Enabling iscsid service (Required for Longhorn)..."
+echo "$NODE_PASS" | sudo -S -p '' systemctl enable --now iscsid
+
+echo "   - Checking Data Path: $DATA_PATH"
+if [ ! -d "/data" ]; then
+    echo "WARNING: /data directory does not exist on $NODE! Longhorn might fill up your root disk."
+else
+    echo "$NODE_PASS" | sudo -S -p '' mkdir -p $DATA_PATH
+fi
 EOF
 )
+        # Execute via SSH
         B64_CMD=$(echo "$CMD_CONTENT" | base64 -w0)
-        
         if [ "$NODE" == "$(hostname)" ]; then
             echo "$B64_CMD" | base64 -d | bash
         else
@@ -86,50 +56,60 @@ EOF
     done
 }
 
-# 2.5 Detect NFS Server IP on 25Gb iface when requested
-detect_nfs_ip() {
-    if [ "$NFS_SERVER_IP" = "auto" ]; then
-        echo ">> Detecting NFS Server IP on iface $STORAGE_IFACE..."
-        CMD_CONTENT=$(cat <<EOF
-ip -4 -o addr show "$STORAGE_IFACE" | awk '{print \$4}' | cut -d/ -f1
-EOF
-)
-        B64_CMD=$(echo "$CMD_CONTENT" | base64 -w0)
-        if [ "$NFS_SERVER_NODE" == "$(hostname)" ]; then
-            NFS_SERVER_IP=$(echo "$B64_CMD" | base64 -d | bash)
-        else
-            NFS_SERVER_IP=$(sshpass -p "$NODE_PASS" ssh -o StrictHostKeyChecking=no -t $NFS_SERVER_NODE "echo '$B64_CMD' | base64 -d | bash" 2>/dev/null | tr -d '\r')
-        fi
-        echo ">> Detected NFS Server IP: $NFS_SERVER_IP"
+check_environment() {
+    echo ">> [Step 2] Checking Kubernetes connection..."
+    if ! kubectl get nodes > /dev/null 2>&1; then
+        echo "Error: kubectl is not working. Please check your kubeconfig."
+        exit 1
+    fi
+    echo "   - Kubernetes cluster is reachable."
+}
+
+deploy_longhorn() {
+    echo ">> [Step 3] Deploying Longhorn via Helm..."
+
+    # Add Helm Repo
+    helm repo add longhorn https://charts.longhorn.io 2>/dev/null || true
+    helm repo update >/dev/null
+    
+    echo "   - Installing Longhorn Chart (This may take 2-3 minutes)..."
+    helm upgrade --install longhorn longhorn/longhorn \
+        --namespace $NAMESPACE \
+        --create-namespace \
+        --version $LONGHORN_VERSION \
+        --set defaultSettings.defaultDataPath="$DATA_PATH" \
+        --set defaultSettings.defaultReplicaCount=$REPLICA_COUNT \
+        --set persistence.defaultClass=true \
+        --set persistence.defaultClassReplicaCount=$REPLICA_COUNT \
+        --set ingress.enabled=false \
+        --wait
+
+    echo ">> Longhorn Deployed Successfully."
+}
+
+cleanup_old_nfs() {
+    echo ">> [Step 4] Checking for old NFS provisioner..."
+    if helm list -n nfs-storage | grep -q "nfs-client"; then
+        echo "   - Found old 'nfs-client'. Removing to avoid Default StorageClass conflict..."
+        helm uninstall nfs-client -n nfs-storage
+        echo "   - Old NFS provisioner removed."
+    else
+        echo "   - No old NFS provisioner found. Skipping."
     fi
 }
 
-# 3. Deploy Kubernetes NFS Provisioner
-setup_k8s_provisioner() {
-    echo ">> Deploying NFS Subdir External Provisioner..."
-    
-    helm repo add nfs-subdir-external-provisioner https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/ 2>/dev/null || true
-    helm repo update >/dev/null
-
-    helm upgrade --install nfs-client nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
-        --namespace nfs-storage \
-        --create-namespace \
-        --set nfs.server=$NFS_SERVER_IP \
-        --set nfs.path=$EXPORT_PATH \
-        --set storageClass.name=nfs-client \
-        --set storageClass.defaultClass=true \
-        --set storageClass.allowVolumeExpansion=true
-
-    echo ">> NFS Provisioner Installed."
-}
-
-# Execution
-setup_nfs_server
-setup_clients
-detect_nfs_ip
-setup_k8s_provisioner
+install_dependencies
+check_environment
+cleanup_old_nfs
+deploy_longhorn
 
 echo "====================================================="
-echo "   NFS SETUP COMPLETE"
+echo "   LONGHORN SETUP COMPLETE"
 echo "====================================================="
-echo "StorageClass 'nfs-client' is now available and set as default."
+echo "1. Access the UI via Port Forwarding:"
+echo "   kubectl port-forward -n longhorn-system svc/longhorn-frontend 8080:80"
+echo "   Then open: http://localhost:8080"
+echo ""
+echo "2. Storage Location: Nodes are configured to store data in '$DATA_PATH'"
+echo "3. Default StorageClass: 'longhorn' is now the default."
+echo "====================================================="
