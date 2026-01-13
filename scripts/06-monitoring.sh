@@ -12,28 +12,20 @@ LONGHORN_NAMESPACE="longhorn-system"
 HARBOR_ADMIN_PASSWORD=${HARBOR_ADMIN_PASSWORD:-"HarborProd123!"}
 STORAGE_HOSTNAME="gpu1-storage"
 
-# === [NETWORK CONFIGURATION] ===
-# 1. UI/Management IP (1Gbps) - For Admin Browser Access
 UI_IP="192.168.109.1"
-
-# 2. Data/Storage IP (25Gbps) - For High Speed Docker Pull/Push
 DATA_IP="192.168.110.1"
 
-# === [PORTS CONFIGURATION] ===
-# Static NodePorts for consistent access
-HTTPS_NODE_PORT=30003   # Harbor HTTPS
-HTTP_NODE_PORT=30002    # Harbor HTTP (Redirect)
-GRAFANA_PORT=30004      # Grafana UI
-LONGHORN_UI_PORT=30005  # Longhorn UI (New)
+HTTPS_NODE_PORT=30003
+HTTP_NODE_PORT=30002
+GRAFANA_PORT=30004
+LONGHORN_UI_PORT=30005
 
-# Paths & Storage
 CERTS_DIR="certs"
 CERT_CONFIGMAP_PATH="/tmp/harbor-ca-configmap.yaml"
 CERT_DAEMONSET_PATH="/tmp/harbor-ca-daemonset.yaml"
 STORAGE_CLASS="longhorn"
 DCGM_MANIFEST_PATH="../manifests/gpu/gpu-exporter.yaml"
 
-# Logging Helpers
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
@@ -51,7 +43,6 @@ step "1. Network & Pre-flight Checks"
 log "Management Interface (UI):   $UI_IP"
 log "Storage Interface (Data):    $DATA_IP"
 
-# Sanity Check for 25Gb subnet
 if [[ "$DATA_IP" != "192.168.110."* ]]; then
     warn "Warning: DATA_IP ($DATA_IP) does not look like the 110.x subnet."
     read -p "Continue anyway? (y/n) " -n 1 -r
@@ -59,28 +50,33 @@ if [[ "$DATA_IP" != "192.168.110."* ]]; then
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then exit 1; fi
 fi
 
-# Check Helm
 if ! command -v helm &> /dev/null; then
     log "Helm not found. Installing..."
     curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 fi
 
-step "2. Certificate Generation (Dual-IP Support)"
-log "Generating SSL certificates for both $UI_IP and $DATA_IP..."
+step "2. Certificate Generation (Persistence Optimized)"
 mkdir -p "$CERTS_DIR"
 
-# Generate CA
-openssl genrsa -out "$CERTS_DIR/ca.key" 4096
-openssl req -x509 -new -nodes -sha512 -days 3650 \
- -subj "/C=TW/ST=Taipei/L=Taipei/O=GPU-Cluster/OU=IT/CN=Harbor-CA" \
- -key "$CERTS_DIR/ca.key" -out "$CERTS_DIR/ca.crt"
+# [MODIFIED] Check for existing CA to avoid generating new root
+if [[ -f "$CERTS_DIR/ca.key" && -f "$CERTS_DIR/ca.crt" ]]; then
+    log "Existing CA found. Keeping current Root CA to maintain trust chain."
+else
+    log "Generating new Root CA..."
+    openssl genrsa -out "$CERTS_DIR/ca.key" 4096
+    openssl req -x509 -new -nodes -sha512 -days 3650 \
+     -subj "/C=TW/ST=Taipei/L=Taipei/O=GPU-Cluster/OU=IT/CN=Harbor-CA" \
+     -key "$CERTS_DIR/ca.key" -out "$CERTS_DIR/ca.crt"
+fi
 
-# Generate Server Key
+# [MODIFIED] Always refresh server certificate
+rm -f "$CERTS_DIR/harbor.key" "$CERTS_DIR/harbor.crt" "$CERTS_DIR/harbor.csr"
+
+log "Generating fresh server certificate for $UI_IP and $DATA_IP..."
 openssl genrsa -out "$CERTS_DIR/harbor.key" 4096
 openssl req -new -key "$CERTS_DIR/harbor.key" -out "$CERTS_DIR/harbor.csr" \
   -subj "/C=TW/ST=Taipei/L=Taipei/O=GPU-Cluster/OU=IT/CN=$DATA_IP"
 
-# V3 Extension (Subject Alternative Name)
 cat > "$CERTS_DIR/v3.ext" <<-EOF
 authorityKeyIdentifier=keyid,issuer
 basicConstraints=CA:FALSE
@@ -93,35 +89,24 @@ IP.2 = $UI_IP
 DNS.1 = $STORAGE_HOSTNAME
 EOF
 
-# Sign Certificate
 openssl x509 -req -in "$CERTS_DIR/harbor.csr" -CA "$CERTS_DIR/ca.crt" -CAkey "$CERTS_DIR/ca.key" -CAcreateserial \
  -out "$CERTS_DIR/harbor.crt" -days 3650 -sha512 -extfile "$CERTS_DIR/v3.ext"
 
-log "Certificates generated successfully."
-
 step "3. Prepare Kubernetes Secrets"
-step "3. Prepare Kubernetes Secrets"
-# Create namespaces
 kubectl create namespace $HARBOR_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace $MONITOR_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace $INSTALLER_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 
-# Harbor HTTPS Secret
+# Update Harbor TLS Secret
 kubectl -n $HARBOR_NAMESPACE delete secret harbor-https-secret --ignore-not-found
 kubectl -n $HARBOR_NAMESPACE create secret tls harbor-https-secret \
   --key "$CERTS_DIR/harbor.key" \
   --cert "$CERTS_DIR/harbor.crt"
 
-# Docker Registry Credential (Global Sync)
+# Sync Regcred
 REGISTRY_NAMESPACES="default harbor monitoring longhorn-system nfs-storage $(kubectl get ns --field-selector status.phase=Active -o jsonpath='{.items[*].metadata.name}')"
-REGISTRY_NAMESPACES=$(echo "$REGISTRY_NAMESPACES" | tr ' ' '\n' | sort -u | tr '\n' ' ')
-
-log "Syncing Docker Registry Secret to all namespaces..."
-for NS in $REGISTRY_NAMESPACES; do
-  # Skip kube-public or kube-node-lease if needed, but usually okay
-  # [FIX] Add '|| true' to prevent script exit on failure
+for NS in $(echo "$REGISTRY_NAMESPACES" | tr ' ' '\n' | sort -u); do
   kubectl delete secret harbor-regcred -n "$NS" --ignore-not-found >/dev/null 2>&1 || true
-  
   kubectl create secret docker-registry harbor-regcred \
     --docker-server="$DATA_IP:$HTTPS_NODE_PORT" \
     --docker-username="admin" \
@@ -129,11 +114,8 @@ for NS in $REGISTRY_NAMESPACES; do
     --docker-email="admin@example.com" \
     -n "$NS" >/dev/null 2>&1 || true
 done
-log "Secret sync complete."
 
-step "4. Distribute CA to Nodes (Containerd Trust)"
-log "Configuring all nodes to trust Harbor CA on port $HTTPS_NODE_PORT..."
-
+step "4. Distribute CA to Nodes"
 # ConfigMap
 cat > "$CERT_CONFIGMAP_PATH" <<EOF
 apiVersion: v1
@@ -146,7 +128,7 @@ data:
 $(sed 's/^/    /' "$CERTS_DIR/ca.crt")
 EOF
 
-# DaemonSet
+# [MODIFIED] DaemonSet with robust printf instead of nested heredoc
 cat > "$CERT_DAEMONSET_PATH" <<EOF
 apiVersion: apps/v1
 kind: DaemonSet
@@ -176,39 +158,22 @@ spec:
           - |
             set -e
             apk add --no-cache util-linux >/dev/null
-            
-            # Using DATA_IP for internal node communication
             TARGET_IP="$DATA_IP"
             TARGET_PORT="$HTTPS_NODE_PORT"
-            
-            CONFIG_TOML="/host/etc/containerd/config.toml"
             HOSTS_DIR="/host/etc/containerd/certs.d/\$TARGET_IP:\$TARGET_PORT"
-            HOSTS_FILE="\$HOSTS_DIR/hosts.toml"
             
-            echo "Installing CA for \$TARGET_IP..."
-
-            # 1. Containerd Config Check
-            if [ ! -f "\$CONFIG_TOML" ]; then
-              mkdir -p /host/etc/containerd
-              nsenter --mount=/proc/1/ns/mnt -- containerd config default > "\$CONFIG_TOML"
-            fi
-            
-            if grep -q 'config_path = ""' "\$CONFIG_TOML"; then
-              sed -i 's|config_path = ""|config_path = "/etc/containerd/certs.d"|g' "\$CONFIG_TOML"
-            fi
-
-            # 2. Create certs.d entry
             mkdir -p "\$HOSTS_DIR"
             cp /config/ca.crt "\$HOSTS_DIR/ca.crt"
             
-            printf 'server = "https://%s:%s"\n' "\$TARGET_IP" "\$TARGET_PORT" > "\$HOSTS_FILE"
-            printf '[host."https://%s:%s"]\n' "\$TARGET_IP" "\$TARGET_PORT" >> "\$HOSTS_FILE"
-            printf '  capabilities = ["pull", "resolve", "push"]\n' >> "\$HOSTS_FILE"
-            printf '  ca = "/etc/containerd/certs.d/%s:%s/ca.crt"\n' "\$TARGET_IP" "\$TARGET_PORT" >> "\$HOSTS_FILE"
+            # Using printf to avoid YAML/Shell interpolation issues
+            printf 'server = "https://%s:%s"\n[host."https://%s:%s"]\n  capabilities = ["pull", "resolve", "push"]\n  ca = "/etc/containerd/certs.d/%s:%s/ca.crt"\n' \
+            "\$TARGET_IP" "\$TARGET_PORT" "\$TARGET_IP" "\$TARGET_PORT" "\$TARGET_IP" "\$TARGET_PORT" > "\$HOSTS_DIR/hosts.toml"
 
-            # 3. Reload Containerd
-            echo "Reloading containerd..."
-            nsenter --mount=/proc/1/ns/mnt -- systemctl restart containerd
+            CONFIG_TOML="/host/etc/containerd/config.toml"
+            if grep -q 'config_path = ""' "\$CONFIG_TOML" || ! grep -q 'config_path' "\$CONFIG_TOML"; then
+              sed -i 's|config_path = .*|config_path = "/etc/containerd/certs.d"|g' "\$CONFIG_TOML"
+              nsenter --target 1 --mount -- systemctl restart containerd
+            fi
         volumeMounts:
         - name: host-etc
           mountPath: /host/etc
@@ -226,35 +191,39 @@ spec:
           name: harbor-ca-cert
 EOF
 
-kubectl delete daemonset harbor-cert-installer -n $INSTALLER_NAMESPACE --ignore-not-found >/dev/null
 kubectl apply -f "$CERT_CONFIGMAP_PATH"
 kubectl apply -f "$CERT_DAEMONSET_PATH"
-log "Waiting for CA distribution..."
 kubectl rollout status daemonset/harbor-cert-installer -n $INSTALLER_NAMESPACE --timeout=180s
 
-step "5. Deploy Harbor Registry"
-log "Deploying Harbor..."
+step "5. Deploy/Upgrade Harbor"
 helm repo add harbor https://helm.goharbor.io 2>/dev/null
 helm repo update > /dev/null
+step "5. Update Harbor Certificates (Preserving PVC)"
 
-helm upgrade --install harbor harbor/harbor \
-  --namespace $HARBOR_NAMESPACE \
-  --set harborAdminPassword="$HARBOR_ADMIN_PASSWORD" \
-  --set expose.type=nodePort \
-  --set expose.tls.enabled=true \
-  --set expose.tls.certSource=secret \
-  --set expose.tls.secret.secretName=harbor-https-secret \
-  --set expose.tls.nodePort=$HTTPS_NODE_PORT \
-  --set expose.nodePort.httpNodePort=$HTTP_NODE_PORT \
-  --set externalURL="https://$DATA_IP:$HTTPS_NODE_PORT" \
-  --set persistence.persistentVolumeClaim.registry.storageClass=$STORAGE_CLASS \
-  --set persistence.persistentVolumeClaim.registry.size=200Gi \
-  --set persistence.persistentVolumeClaim.jobservice.storageClass=$STORAGE_CLASS \
-  --set persistence.persistentVolumeClaim.database.storageClass=$STORAGE_CLASS \
-  --set persistence.persistentVolumeClaim.redis.storageClass=$STORAGE_CLASS \
-  --set persistence.persistentVolumeClaim.trivy.storageClass=$STORAGE_CLASS \
-  --set internalTLS.enabled=false \
-  --wait
+log "Checking harbor-https-secret..."
+kubectl get secret harbor-https-secret -n $HARBOR_NAMESPACE
+
+if helm status harbor -n $HARBOR_NAMESPACE &> /dev/null; then
+    log "Harbor is already installed. Updating certificates without touching PVCs..."
+    
+    kubectl rollout restart deployment -n $HARBOR_NAMESPACE
+
+    log "Harbor deployments restarted to apply new SSL certificates."
+else
+    log "Harbor not found. Performing fresh installation..."
+    helm install harbor harbor/harbor \
+      --namespace $HARBOR_NAMESPACE \
+      --set harborAdminPassword="$HARBOR_ADMIN_PASSWORD" \
+      --set expose.type=nodePort \
+      --set expose.tls.enabled=true \
+      --set expose.tls.certSource=secret \
+      --set expose.tls.secret.secretName=harbor-https-secret \
+      --set expose.tls.nodePort=$HTTPS_NODE_PORT \
+      --set externalURL="https://$DATA_IP:$HTTPS_NODE_PORT" \
+      --set persistence.persistentVolumeClaim.registry.storageClass=$STORAGE_CLASS \
+      --set persistence.persistentVolumeClaim.registry.size=200Gi \
+      --wait
+fi
 
 step "6. Deploy Monitoring (Production Config)"
 log "Generating Production Values for Prometheus & Grafana..."
