@@ -81,22 +81,20 @@ ssh user@master 'cd k8s-multicast-setting/scripts && sudo ./get-join-command.sh'
 # copy output and run the printed kubeadm join command on the worker node
 ```
 
-After joining, run the harbor/containerd configuration on each worker:
+After joining: configure Harbor/containerd trust and any GPU host prerequisites using the `worker-node/` helpers (for GPU nodes see `worker-node/02-worker-gpu-harbor.sh`).
+
+Repair and test helpers are available in `scripts/tools/` and the repo root `scripts/`:
 
 ```bash
-sudo ./06-configure-harbor-registry.sh
-```
+# repair helpers
+ls -1 scripts/tools
 
-3) Install Multus + macvlan (master only)
+# optional reboot helper
+sudo ./09-reboot.sh
 
-```bash
-sudo ./02-install-cni-multicast.sh
-```
-
-4) GPU support (GPU nodes only)
-
-```bash
-sudo ./03-install-gpu-drivers.sh
+# MPS pressure test helpers
+./mps-pressure-apply.sh
+./mps-pressure-logs.sh
 ```
 
 5) Install monitoring, storage, registry (master only)
@@ -193,5 +191,6 @@ kubectl -n harbor get svc
 ## Notes
 
 - Edit script variables (interface name, CIDRs, IP ranges, MASTER_IP) inside `scripts/` before running.
-- `00-sysctl-tuning.sh` and `07-configure-harbor-registry.sh` should be run on all nodes (master + workers).
+- `00-sysctl-tuning.sh` should be run on all nodes (master + workers).
+- Use `worker-node/02-worker-gpu-harbor.sh` to configure Harbor trust and the NVIDIA container toolkit on GPU workers.
 - Keep the cluster secure: review Harbor/Grafana anonymous access settings before enabling.
