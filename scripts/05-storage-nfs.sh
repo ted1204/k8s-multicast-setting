@@ -2,9 +2,9 @@
 set -e
 
 # Nodes Configuration
-NODES=("gpu1" "gpu2" "gpu3")
-NFS_SERVER_NODE="gpu1"
-NFS_SERVER_IP="192.168.109.1"
+NODES=("work1@k8s-work1" "master@k8s-master")
+NFS_SERVER_NODE="work1@k8s-work1"
+NFS_SERVER_IP="10.121.124.22"
 EXPORT_PATH="/data/k8s-nfs"
 
 # Interactive Password Prompt
@@ -13,6 +13,13 @@ if [ -z "$NODE_PASS" ]; then
     echo ""
 fi
 export NODE_PASS
+
+if ! command -v sshpass &> /dev/null; then
+    echo "[INFO] sshpass not found. Installing..."
+    echo "$NODE_PASS" | sudo -S apt-get update -qq
+    echo "$NODE_PASS" | sudo -S apt-get install -y sshpass -qq
+    echo "[OK] sshpass installed successfully."
+fi
 
 echo "====================================================="
 echo "   SETTING UP NFS SERVER ON $NFS_SERVER_NODE"
@@ -55,7 +62,7 @@ EOF
     # Encode
     B64_CMD=$(echo "$CMD_CONTENT" | base64 -w0)
     
-    if [ "$NFS_SERVER_NODE" == "$(hostname)" ]; then
+    if [ "$NFS_SERVER_NODE" == *"$(hostname)"* ]; then
         echo "$B64_CMD" | base64 -d | bash
     else
         sshpass -p "$NODE_PASS" ssh -o StrictHostKeyChecking=no -t $NFS_SERVER_NODE "echo '$B64_CMD' | base64 -d | bash"
@@ -74,7 +81,7 @@ EOF
 )
         B64_CMD=$(echo "$CMD_CONTENT" | base64 -w0)
         
-        if [ "$NODE" == "$(hostname)" ]; then
+        if [ "$NODE" == *"$(hostname)"* ]; then
             echo "$B64_CMD" | base64 -d | bash
         else
             sshpass -p "$NODE_PASS" ssh -o StrictHostKeyChecking=no -t $NODE "echo '$B64_CMD' | base64 -d | bash"
@@ -84,6 +91,25 @@ EOF
 
 # 3. Deploy Kubernetes NFS Provisioner
 setup_k8s_provisioner() {
+    if ! command -v helm &> /dev/null; then
+        echo "[INFO] Helm not found. Installing via official script..."
+        
+        # 先安裝依賴工具
+        echo "$NODE_PASS" | sudo -S apt-get install -y curl -qq
+        
+        # 下載官方安裝腳本
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        
+        # 賦予執行權限
+        chmod 700 get_helm.sh
+        
+        # 執行安裝 (腳本內部會自動處理 sudo)
+        echo "$NODE_PASS" | sudo -S ./get_helm.sh
+        
+        # 清理
+        rm get_helm.sh
+        echo "[OK] Helm installed successfully."
+    fi
     echo ">> Deploying NFS Subdir External Provisioner..."
     
     helm repo add nfs-subdir-external-provisioner https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/ 2>/dev/null || true

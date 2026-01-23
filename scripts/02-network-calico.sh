@@ -5,7 +5,7 @@ set -e
 CALICO_VERSION="v3.29.1"
 POD_CIDR=${POD_CIDR:-"10.244.0.0/16"}
 # The correct physical network CIDR where nodes communicate
-NODE_CIDR="192.168.109.0/24"
+NODE_CIDR="10.121.124.0/24"
 # =================================================
 
 echo "=== 2. Install Primary CNI (Calico) ==="
