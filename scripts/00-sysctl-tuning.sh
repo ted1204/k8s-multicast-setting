@@ -55,12 +55,17 @@ sudo sysctl --system
 # 4. Enable Services to Start on Boot (Fixes 'connection refused' after reboot)
 echo ">>> Enabling Kubelet & Containerd auto-start..."
 sudo systemctl daemon-reload
+<<<<<<< HEAD
 if systemctl list-unit-files | grep -q kubelet.service; then
   sudo systemctl enable kubelet
 fi
 if systemctl list-unit-files | grep -q containerd.service; then
   sudo systemctl enable containerd
 fi
+=======
+# sudo systemctl enable kubelet
+# sudo systemctl enable containerd
+>>>>>>> origin/master
 # If Docker is installed, enable it too (optional)
 if systemctl list-unit-files | grep -q docker.service; then
   sudo systemctl enable docker

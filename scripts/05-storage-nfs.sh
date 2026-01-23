@@ -1,11 +1,22 @@
 #!/bin/bash
 set -e
 
+<<<<<<< HEAD
 # Nodes Configuration
 NODES=("work1@k8s-work1" "master@k8s-master")
 NFS_SERVER_NODE="work1@k8s-work1"
 NFS_SERVER_IP="10.121.124.22"
 EXPORT_PATH="/data/k8s-nfs"
+=======
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+NODES=("gpu1" "gpu2" "gpu3")
+LONGHORN_VERSION="v1.6.0"
+DATA_PATH="/data/longhorn"
+REPLICA_COUNT=3
+NAMESPACE="longhorn-system"
+>>>>>>> origin/master
 
 # Interactive Password Prompt
 if [ -z "$NODE_PASS" ]; then
@@ -22,9 +33,10 @@ if ! command -v sshpass &> /dev/null; then
 fi
 
 echo "====================================================="
-echo "   SETTING UP NFS SERVER ON $NFS_SERVER_NODE"
+echo "   PREPARING PRODUCTION LONGHORN STORAGE"
 echo "====================================================="
 
+<<<<<<< HEAD
 # 1. Install NFS Server on gpu1
 setup_nfs_server() {
     echo ">> Configuring NFS Server on $NFS_SERVER_NODE..."
@@ -71,17 +83,41 @@ EOF
 
 # 2. Install Client Packages on ALL nodes
 setup_clients() {
+=======
+install_dependencies() {
+>>>>>>> origin/master
     for NODE in "${NODES[@]}"; do
-        echo ">> Installing NFS Client on $NODE..."
+        echo ">> [Step 1] Configuring Dependencies on $NODE..."
+        
+        # Longhorn requires open-iscsi and nfs-common (for backups)
+        # util-linux is for nsenter
         CMD_CONTENT=$(cat <<EOF
 set -e
+echo "   - Updating apt cache..."
 echo "$NODE_PASS" | sudo -S -p '' apt-get update -qq
-echo "$NODE_PASS" | sudo -S -p '' apt-get install -y nfs-common
+
+echo "   - Installing open-iscsi, nfs-common, cryptsetup..."
+echo "$NODE_PASS" | sudo -S -p '' apt-get install -y open-iscsi nfs-common util-linux cryptsetup jq
+
+echo "   - Enabling iscsid service (Required for Longhorn)..."
+echo "$NODE_PASS" | sudo -S -p '' systemctl enable --now iscsid
+
+echo "   - Checking Data Path: $DATA_PATH"
+if [ ! -d "/data" ]; then
+    echo "WARNING: /data directory does not exist on $NODE! Longhorn might fill up your root disk."
+else
+    echo "$NODE_PASS" | sudo -S -p '' mkdir -p $DATA_PATH
+fi
 EOF
 )
+        # Execute via SSH
         B64_CMD=$(echo "$CMD_CONTENT" | base64 -w0)
+<<<<<<< HEAD
         
         if [ "$NODE" == *"$(hostname)"* ]; then
+=======
+        if [ "$NODE" == "$(hostname)" ]; then
+>>>>>>> origin/master
             echo "$B64_CMD" | base64 -d | bash
         else
             sshpass -p "$NODE_PASS" ssh -o StrictHostKeyChecking=no -t $NODE "echo '$B64_CMD' | base64 -d | bash"
@@ -89,6 +125,7 @@ EOF
     done
 }
 
+<<<<<<< HEAD
 # 3. Deploy Kubernetes NFS Provisioner
 setup_k8s_provisioner() {
     if ! command -v helm &> /dev/null; then
@@ -125,14 +162,62 @@ setup_k8s_provisioner() {
         --set storageClass.allowVolumeExpansion=true
 
     echo ">> NFS Provisioner Installed."
+=======
+check_environment() {
+    echo ">> [Step 2] Checking Kubernetes connection..."
+    if ! kubectl get nodes > /dev/null 2>&1; then
+        echo "Error: kubectl is not working. Please check your kubeconfig."
+        exit 1
+    fi
+    echo "   - Kubernetes cluster is reachable."
+>>>>>>> origin/master
 }
 
-# Execution
-setup_nfs_server
-setup_clients
-setup_k8s_provisioner
+deploy_longhorn() {
+    echo ">> [Step 3] Deploying Longhorn via Helm..."
+
+    # Add Helm Repo
+    helm repo add longhorn https://charts.longhorn.io 2>/dev/null || true
+    helm repo update >/dev/null
+    
+    echo "   - Installing Longhorn Chart (This may take 2-3 minutes)..."
+    helm upgrade --install longhorn longhorn/longhorn \
+        --namespace $NAMESPACE \
+        --create-namespace \
+        --version $LONGHORN_VERSION \
+        --set defaultSettings.defaultDataPath="$DATA_PATH" \
+        --set defaultSettings.defaultReplicaCount=$REPLICA_COUNT \
+        --set persistence.defaultClass=true \
+        --set persistence.defaultClassReplicaCount=$REPLICA_COUNT \
+        --set ingress.enabled=false \
+        --wait
+
+    echo ">> Longhorn Deployed Successfully."
+}
+
+cleanup_old_nfs() {
+    echo ">> [Step 4] Checking for old NFS provisioner..."
+    if helm list -n nfs-storage | grep -q "nfs-client"; then
+        echo "   - Found old 'nfs-client'. Removing to avoid Default StorageClass conflict..."
+        helm uninstall nfs-client -n nfs-storage
+        echo "   - Old NFS provisioner removed."
+    else
+        echo "   - No old NFS provisioner found. Skipping."
+    fi
+}
+
+install_dependencies
+check_environment
+cleanup_old_nfs
+deploy_longhorn
 
 echo "====================================================="
-echo "   NFS SETUP COMPLETE"
+echo "   LONGHORN SETUP COMPLETE"
 echo "====================================================="
-echo "StorageClass 'nfs-client' is now available and set as default."
+echo "1. Access the UI via Port Forwarding:"
+echo "   kubectl port-forward -n longhorn-system svc/longhorn-frontend 8080:80"
+echo "   Then open: http://localhost:8080"
+echo ""
+echo "2. Storage Location: Nodes are configured to store data in '$DATA_PATH'"
+echo "3. Default StorageClass: 'longhorn' is now the default."
+echo "====================================================="

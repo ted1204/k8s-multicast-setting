@@ -10,7 +10,9 @@ This repo contains scripts and example manifests to set up a Kubernetes cluster 
 - Harbor (private registry)
 
 This README is a short, script-driven install guide—run the scripts in order. Edit script variables (interface, CIDRs, IPs) before running.
+
 ---
+
 
 ## Quick script-driven install (concise)
 
@@ -52,10 +54,10 @@ sudo ./01-cluster-init.sh
 ./04-network-multus.sh
 ```
 
-6) **Setup Storage (NFS)**
+6) **Setup Storage (Longhorn)**
 ```bash
-# Deploys NFS Provisioner (replaces Longhorn)
-./05-storage-nfs.sh
+# Deploys Longhorn storage
+./05-storage-longhorn.sh
 ```
 
 7) **Setup GPU Support**
@@ -81,22 +83,20 @@ ssh user@master 'cd k8s-multicast-setting/scripts && sudo ./get-join-command.sh'
 # copy output and run the printed kubeadm join command on the worker node
 ```
 
-After joining, run the harbor/containerd configuration on each worker:
+After joining: configure Harbor/containerd trust and any GPU host prerequisites using the `worker-node/` helpers (for GPU nodes see `worker-node/02-worker-gpu-harbor.sh`).
+
+Repair and test helpers are available in `scripts/tools/` and the repo root `scripts/`:
 
 ```bash
-sudo ./06-configure-harbor-registry.sh
-```
+# repair helpers
+ls -1 scripts/tools
 
-3) Install Multus + macvlan (master only)
+# optional reboot helper
+sudo ./09-reboot.sh
 
-```bash
-sudo ./02-install-cni-multicast.sh
-```
-
-4) GPU support (GPU nodes only)
-
-```bash
-sudo ./03-install-gpu-drivers.sh
+# MPS pressure test helpers
+./mps-pressure-apply.sh
+./mps-pressure-logs.sh
 ```
 
 5) Install monitoring, storage, registry (master only)
@@ -193,5 +193,30 @@ kubectl -n harbor get svc
 ## Notes
 
 - Edit script variables (interface name, CIDRs, IP ranges, MASTER_IP) inside `scripts/` before running.
-- `00-sysctl-tuning.sh` and `07-configure-harbor-registry.sh` should be run on all nodes (master + workers).
+- `00-sysctl-tuning.sh` should be run on all nodes (master + workers).
+- Use `worker-node/02-worker-gpu-harbor.sh` to configure Harbor trust and the NVIDIA container toolkit on GPU workers.
 - Keep the cluster secure: review Harbor/Grafana anonymous access settings before enabling.
+
+## Important cluster notes
+
+- Network and interface settings are environment specific. The interface names, CIDR ranges, and secondary L2 network configurations (macvlan/multus) in `scripts/` are examples and must be updated for your environment. Check and update interface names (for example `eth1` or `enp0s8`), CIDRs, and any hard-coded IPs (such as `MASTER_IP` or `HARBOR_IP`) before running scripts.
+
+- Host network interfaces: Many network installation steps use a host interface directly. Ensure the interface exists and is not managed by other services (for example cloud-init or NetworkManager) before applying changes.
+
+- Storage and `hostPath`: Development manifests or scripts that use `hostPath` or local PVs require attention to directory permissions and SELinux contexts (if applicable). Avoid using `hostPath` in production; use PVCs, Secrets, or ConfigMaps instead.
+
+## Backend and deployment notes
+
+- Initial database and admin account: The project requires an initial database schema and seed. See `backend/infra/db/schema.sql` for the seed data. Provide a `.env` file or Kubernetes Secret with correct database credentials before starting the backend so initialization and seeding can run successfully.
+
+- Backend images and development `hostPath`: During development the backend build and manifests may mount host paths (for example to access local data or certificates). This is for convenience only. For production or shared clusters:
+  - Do not use development `hostPath` mounts. Use `PVC`, `Secret`, or `ConfigMap` instead.
+  - Edit `backend/scripts/build_image.sh` to set your registry, namespace, image name, and tag before pushing images to your registry.
+
+- Manifest and apply order: Ensure the backend image is built and pushed to the registry, then update manifest image strings and apply manifests. A suggested order:
+
+  1. `kubectl apply -f ca.yaml` (if TLS/CA manifests are required)
+  2. `kubectl apply -f go-api.yaml`
+  3. `kubectl apply -f postgres.yaml`
+
+  Adjust the order as needed for PV/PVC creation and database readiness.
