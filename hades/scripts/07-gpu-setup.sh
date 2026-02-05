@@ -16,6 +16,13 @@ if [ "$REPLICAS" -lt 1 ]; then
   REPLICAS=1
 fi
 
+# Interactive Password Prompt
+if [ -z "$NODE_PASS" ]; then
+    read -s -p "Enter password for nodes (used for SSH & sudo): " NODE_PASS
+    echo ""
+fi
+export NODE_PASS
+
 # Validate args
 if [ -z "$CUSTOM_PREFIX" ] || [ -z "$TARGET_NODE" ] || [ -z "$PLUGIN_IMAGE_REPO" ]; then
   echo "[ERROR] Usage: ./03-install-gpu-drivers.sh <replicas-per-gpu> <resource-name> <node-name|all> <image-repo> [image-tag] [image-pull-secret]"
@@ -84,11 +91,21 @@ if command -v systemctl >/dev/null 2>&1; then
     # For multi-node, you may need to SSH to each node or use ansible/pssh
     echo "[WARN] Multi-node kubelet restart not automated. Please restart kubelet on each GPU node manually if needed."
   else
-    sudo systemctl stop kubelet || true
-    sudo rm -f /var/lib/kubelet/device-plugins/nvidia*.sock 2>/dev/null || true
-    sudo rm -f /var/lib/kubelet/device-plugins/kubelet_internal_checkpoint 2>/dev/null || true
-    sudo rm -f /var/lib/kubelet/device-plugins/*.json 2>/dev/null || true
-    sudo systemctl start kubelet || true
+    if [ "$TARGET_NODE" = "$(hostname)" ]; then
+      sudo systemctl stop kubelet || true
+      sudo rm -f /var/lib/kubelet/device-plugins/nvidia*.sock 2>/dev/null || true
+      sudo rm -f /var/lib/kubelet/device-plugins/kubelet_internal_checkpoint 2>/dev/null || true
+      sudo rm -f /var/lib/kubelet/device-plugins/*.json 2>/dev/null || true
+      sudo systemctl start kubelet || true
+    else
+      sshpass -p "$NODE_PASS" ssh -o StrictHostKeyChecking=no -t "$TARGET_NODE" "
+      echo '$NODE_PASS' | sudo -S systemctl stop kubelet || true;
+      echo '$NODE_PASS' | sudo -S rm -f /var/lib/kubelet/device-plugins/nvidia*.sock || true;
+      echo '$NODE_PASS' | sudo -S rm -f /var/lib/kubelet/device-plugins/kubelet_internal_checkpoint || true;
+      echo '$NODE_PASS' | sudo -S rm -f /var/lib/kubelet/device-plugins/*.json || true;
+      echo '$NODE_PASS' | sudo -S systemctl start kubelet || true
+      "
+    fi
     kubectl wait --for=condition=Ready node/$TARGET_NODE --timeout=120s 2>/dev/null || true
   fi
 else
@@ -180,7 +197,7 @@ if [ "$TARGET_NODE" = "all" ]; then
 else
   kubectl label node "$TARGET_NODE" nvidia.com/mps.capable=true --overwrite
 fi
-helm upgrade --install nvidia-device-plugin /home/user/k8s-gpu-platform/k8s-device-plugin/deployments/helm/nvidia-device-plugin \
+helm upgrade --install nvidia-device-plugin $HOME/k8s-device-plugin/deployments/helm/nvidia-device-plugin \
   --namespace $NS \
   --create-namespace \
   -f "$VALUES_FILE" \

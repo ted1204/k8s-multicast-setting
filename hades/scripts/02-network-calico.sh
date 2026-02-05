@@ -10,7 +10,7 @@ IP_AUTODETECTION_METHOD="interface=enp193s0f1np1"
 # Force IPIP Mode and safer MTU
 CALICO_IPV4POOL_IPIP="Always"
 CALICO_MTU="1440" # Reserve space for encapsulation headers (Total 1500 - 60 safety buffer)
-INTERCONNECT_CIDR="192.168.110.0/24" # Your interconnect subnet
+INTERCONNECT_CIDR="10.121.124.0/24" # Your interconnect subnet
 # =================================================
 
 echo "=== [PART 1] System Level Hardening (Run on ALL Nodes) ==="

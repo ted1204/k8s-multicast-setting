@@ -4,7 +4,7 @@ set -e
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-NODES=("gpu1" "gpu2" "gpu3")
+NODES=("work1@k8s-work1" "master@k8s-master")
 LONGHORN_VERSION="v1.6.0"
 DATA_PATH="/data/longhorn"
 REPLICA_COUNT=3
@@ -16,6 +16,13 @@ if [ -z "$NODE_PASS" ]; then
     echo ""
 fi
 export NODE_PASS
+
+if ! command -v sshpass &> /dev/null; then
+    echo "[INFO] sshpass not found. Installing..."
+    echo "$NODE_PASS" | sudo -S apt-get update -qq
+    echo "$NODE_PASS" | sudo -S apt-get install -y sshpass -qq
+    echo "[OK] sshpass installed successfully."
+fi
 
 echo "====================================================="
 echo "   PREPARING PRODUCTION LONGHORN STORAGE"
